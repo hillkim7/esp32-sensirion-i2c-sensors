@@ -46,10 +46,10 @@ void sht3x_read_task(void *arg)
   float temperature, humidity;
 
   ESP_LOGD(TAG, "sht3x_read_task started");
-  if ((g_sensor = sht3x_init_sensor (I2C_MASTER_NUM, SHT3x_ADDR_1)) == NULL)
+  while ((g_sensor = sht3x_init_sensor (I2C_MASTER_NUM, SHT3x_ADDR_1)) == NULL)
   {
     ESP_LOGE(TAG, "sht3x_init_sensor failed\n");
-    return;
+    vTaskDelay(120000 / portTICK_PERIOD_MS);
   }
 
 #if SLOW_SENSOR_FETCH

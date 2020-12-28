@@ -15,23 +15,20 @@ void sps30_read_task(void *arg)
   struct sps30_measurement m;
   char serial[SPS30_MAX_SERIAL_LEN];
   const uint8_t AUTO_CLEAN_DAYS = 4;
-  int16_t ret, n;
+  int16_t ret;
 
   ESP_LOGD(TAG, "sps30_read_task started");
-  if (sensirion_uart_open() != 0) {
-      ESP_LOGI(TAG, "UART init failed");
-      sensirion_sleep_usec(1000000); /* sleep for 1s */
+  while (sensirion_uart_open() != 0) {
+    ESP_LOGI(TAG, "UART init failed");
+    sensirion_sleep_usec(600000000); /* sleep for 10min */
   }
 
-  n = 0;
   /* Busy loop for initialization, because the main loop does not work without
    * a sensor.
    */
   while (sps30_probe() != 0) {
-      ESP_LOGW(TAG, "SPS30 sensor probing failed");
-      sensirion_sleep_usec(1000000); /* sleep for 1s */
-      if (++n > 3)
-        return;
+    ESP_LOGW(TAG, "SPS30 sensor probing failed");
+    sensirion_sleep_usec(6000000000); /* sleep for 100min */
   }
   ESP_LOGI(TAG, "SPS30 sensor probing successful");
 
@@ -118,7 +115,7 @@ void sps30_read_task(void *arg)
     }
 
     ESP_LOGI(TAG, "No measurements for 1 minute");
-    sensirion_sleep_usec(1000000 * 60);
+    sensirion_sleep_usec(1000000 * 120);
 
     if (version_information.firmware_major >= 2) {
         ret = sps30_wake_up();

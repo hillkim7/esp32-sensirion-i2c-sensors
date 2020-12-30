@@ -4,6 +4,7 @@
 #include "sdkconfig.h"
 #include "sht3x.h"
 #include "sensor_task.h"
+#include <string.h>
 
 #define SLOW_SENSOR_FETCH 1
 
@@ -16,7 +17,9 @@ static const char TAG[] = "sht3x-task";
 #define I2C_MASTER_TX_BUF_DISABLE 0
 #define I2C_MASTER_RX_BUF_DISABLE 0
 
-sht3x_sensor_t* g_sensor;
+static sht3x_sensor_t* sht3x_sensor;
+static char sht3x_device_id[32];
+static sensor_reporter_t sht3x_reporter;
 
 static uint64_t get_uptime_ms()
 {
@@ -41,22 +44,23 @@ static esp_err_t i2c_master_init(void)
     return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
-void sht3x_read_task(void *arg)
+void sht3x_task_run(void *arg)
 {
   float temperature, humidity;
+  char report_buf[128];
 
-  ESP_LOGD(TAG, "sht3x_read_task started");
-  while ((g_sensor = sht3x_init_sensor (I2C_MASTER_NUM, SHT3x_ADDR_1)) == NULL)
+  ESP_LOGD(TAG, "sht3x_task_run started");
+  while ((sht3x_sensor = sht3x_init_sensor (I2C_MASTER_NUM, SHT3x_ADDR_1)) == NULL)
   {
     ESP_LOGE(TAG, "sht3x_init_sensor failed\n");
-    vTaskDelay(120000 / portTICK_PERIOD_MS);
+    vTaskDelay(3600000 / portTICK_PERIOD_MS);
   }
 
 #if SLOW_SENSOR_FETCH
-  sht3x_start_measurement (g_sensor, sht3x_periodic_2mps, sht3x_high);
+  sht3x_start_measurement (sht3x_sensor, sht3x_periodic_2mps, sht3x_high);
 #else
   // Start periodic measurements with 1 measurement per second.
-  sht3x_start_measurement (g_sensor, sht3x_periodic_1mps, sht3x_high);
+  sht3x_start_measurement (sht3x_sensor, sht3x_periodic_1mps, sht3x_high);
 #endif
 
   // Wait until first measurement is ready (constant time of at least 30 ms
@@ -68,10 +72,17 @@ void sht3x_read_task(void *arg)
   while (1) 
   {
     // Get the values and do something with them.
-    if (sht3x_get_results (g_sensor, &temperature, &humidity))
+    if (sht3x_get_results (sht3x_sensor, &temperature, &humidity))
     {
       printf("%.3f SHT3x Sensor: %.2f °C, %.2f %%\n", 
        (double)get_uptime_ms()*1e-3, temperature, humidity);
+      sprintf(report_buf, "{"
+        "\"type\": \"temp/humi\","
+        "\"temp\": %0.2f,"
+        "\"humi\": %0.2f"
+        "}",
+        temperature, humidity);
+      sht3x_reporter(sht3x_device_id, report_buf);
     }
     else
     {
@@ -79,7 +90,7 @@ void sht3x_read_task(void *arg)
     }
 
 #if SLOW_SENSOR_FETCH
-    vTaskDelayUntil(&last_wakeup, 4000 / portTICK_PERIOD_MS);
+    vTaskDelayUntil(&last_wakeup, 30000 / portTICK_PERIOD_MS);
 #else
     // Wait until 2 seconds (cycle time) are over.
     vTaskDelayUntil(&last_wakeup, 2000 / portTICK_PERIOD_MS);
@@ -87,9 +98,11 @@ void sht3x_read_task(void *arg)
   }
 }
 
-void sht3x_task(void)
+void sht3x_task(const char* device_id, sensor_reporter_t reporter)
 {
+  strncpy(sht3x_device_id, device_id, sizeof(sht3x_device_id) - 1);
+  sht3x_reporter = reporter;
   ESP_ERROR_CHECK(i2c_master_init());
-  xTaskCreate(sht3x_read_task, "sht3x_read_task", 1024 * 8, (void *)0, 10, NULL);
+  xTaskCreate(sht3x_task_run, "sht3x_task_run", 1024 * 6, (void *)0, 10, NULL);
 }
 

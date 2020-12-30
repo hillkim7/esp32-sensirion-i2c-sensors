@@ -2,6 +2,7 @@ idf_component_register(SRCS
   "sensor_main.c"
   "sht3x_task.c"
   "sps30_task.c"
+  "mqtt_task.c"
   "wifi_conn.c"
   "cfg.c"
   "sht3x/esp32_wrapper.c"

@@ -56,21 +56,23 @@ void sht3x_task_run(void *arg)
     vTaskDelay(3600000 / portTICK_PERIOD_MS);
   }
 
+  uint64_t last_measure_ms, diff_ms, sleep_ms;
 #if SLOW_SENSOR_FETCH
   sht3x_start_measurement (sht3x_sensor, sht3x_periodic_2mps, sht3x_high);
+  sleep_ms = 60000;
 #else
   // Start periodic measurements with 1 measurement per second.
   sht3x_start_measurement (sht3x_sensor, sht3x_periodic_1mps, sht3x_high);
+  sleep_ms = 5000;
 #endif
 
   // Wait until first measurement is ready (constant time of at least 30 ms
   // or the duration returned from *sht3x_get_measurement_duration*).
   vTaskDelay (sht3x_get_measurement_duration(sht3x_high));
 
-  TickType_t last_wakeup = xTaskGetTickCount();
-  
   while (1) 
   {
+    last_measure_ms = esp_timer_get_time() / 1000;
     // Get the values and do something with them.
     if (sht3x_get_results (sht3x_sensor, &temperature, &humidity))
     {
@@ -79,9 +81,10 @@ void sht3x_task_run(void *arg)
       sprintf(report_buf, "{"
         "\"type\": \"temp/humi\","
         "\"temp\": %0.2f,"
-        "\"humi\": %0.2f"
+        "\"humi\": %0.2f,"
+        "\"t\": %u"
         "}",
-        temperature, humidity);
+        temperature, humidity, (uint32_t)(esp_timer_get_time() / 1000000));
       sht3x_reporter(sht3x_device_id, report_buf);
     }
     else
@@ -89,12 +92,11 @@ void sht3x_task_run(void *arg)
       ESP_LOGW(TAG, "failed to fetch temperature\n");
     }
 
-#if SLOW_SENSOR_FETCH
-    vTaskDelayUntil(&last_wakeup, 30000 / portTICK_PERIOD_MS);
-#else
-    // Wait until 2 seconds (cycle time) are over.
-    vTaskDelayUntil(&last_wakeup, 2000 / portTICK_PERIOD_MS);
-#endif
+    diff_ms = esp_timer_get_time() / 1000 - last_measure_ms;
+    if (diff_ms < sleep_ms)
+    {
+      vTaskDelay((sleep_ms - diff_ms) / portTICK_PERIOD_MS);
+    }
   }
 }
 
@@ -103,6 +105,6 @@ void sht3x_task(const char* device_id, sensor_reporter_t reporter)
   strncpy(sht3x_device_id, device_id, sizeof(sht3x_device_id) - 1);
   sht3x_reporter = reporter;
   ESP_ERROR_CHECK(i2c_master_init());
-  xTaskCreate(sht3x_task_run, "sht3x_task_run", 1024 * 6, (void *)0, 10, NULL);
+  xTaskCreate(sht3x_task_run, "sht3x_task_run", 1024 * 7, (void *)0, 10, NULL);
 }
 

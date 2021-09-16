@@ -81,11 +81,6 @@ static void got_ip6(void *esp_netif, esp_event_base_t event_base,
 
 void wifi_init(void)
 {
-  esp_err_t err = esp_event_loop_create_default();
-  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
-  {
-    ESP_ERROR_CHECK(err);
-  }
   ESP_ERROR_CHECK(esp_netif_init());
   char *desc;
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();

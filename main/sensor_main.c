@@ -2,7 +2,10 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "esp_console.h"
+#include "esp_event.h"
 #include "esp_vfs_dev.h"
+#include "esp_task_wdt.h"
+#include "esp_http_client.h"
 #include "driver/uart.h"
 #include "linenoise/linenoise.h"
 #include "argtable3/argtable3.h"
@@ -18,10 +21,47 @@
 #define SUPPORT_SHT3x 1
 #define SUPPORT_SPS30 1
 #define SUPPORT_MQTT 1
+#define SUPPORT_WATCHDOG 1
 
 static const char TAG[] = "main";
 static CFG app_cfg;
 static char device_mac_str[13];
+static char device_ver_str[] = { __DATE__ " (1.0)" };
+static volatile uint32_t last_publish_sec = 0;
+static size_t http_num_error = 0;
+
+#define TEST_PIN 11
+
+#define TWDT_TIMEOUT_S          3
+#define CHECK_ERROR_CODE(returned, expected) ({                        \
+            if(returned != expected){                                  \
+                printf("TWDT ERROR\n");                                \
+                abort();                                               \
+            }                                                          \
+})
+
+#if 0
+static void test_gpio_init(void)
+{
+  // set GPIO output
+  gpio_config_t io_conf;
+  //disable interrupt
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  //set as output mode
+  io_conf.mode = GPIO_MODE_OUTPUT;
+  //bit mask of the pins that you want to set,e.g.GPIO18/19
+  io_conf.pin_bit_mask = (1ULL<<TEST_PIN);
+  //disable pull-down mode
+  io_conf.pull_down_en = 0;
+  //disable pull-up mode
+  io_conf.pull_up_en = 0;
+  //configure GPIO with the given settings
+  printf("TEST gpio init.. %d\n", TEST_PIN);
+  gpio_config(&io_conf);
+  printf("TEST gpio init ok: %d\n", TEST_PIN);
+  //gpio_set_level(TEST_PIN, 1);
+}
+#endif
 
 static void show_uptime()
 {
@@ -60,20 +100,20 @@ static void _sys(uint32_t ac, char *av[])
   printf("\n");
   if (ac < 2)
   {
-    printf("%s [info|stat|reboot]\n", av[0]);
+    printf("%s [stat|reboot]\n", av[0]);
     return;
   }
 
-  if (!strcmp(cmd, "info"))
+  if (!strcmp(cmd, "stat"))
   {
     printf("Firmware built at " __DATE__ " " __TIME__ "\n");
     show_version();
-  }
-  else if (!strcmp(cmd, "stat"))
-  {
     show_uptime();
     printf("free: %d (min heap: %d)\n", esp_get_free_heap_size(), heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT));
     printf("WIFI MAC: %s\n", device_mac_str);
+#if SUPPORT_WATCHDOG
+    printf("WATCHDOG: supported\n");
+#endif
     wifi_info_print();
     mqtt_task_status_print();
   }
@@ -81,6 +121,23 @@ static void _sys(uint32_t ac, char *av[])
   {
     esp_restart();
   }
+  /*
+  else if (!strcmp(cmd, "test"))
+  {
+    if (atoi(av[2]))
+    {
+      printf("GPIO(%d) high\n", TEST_PIN);
+      gpio_set_level(TEST_PIN, 1);
+      printf("GPIO ok\n");
+    }
+    else
+    {
+      printf("GPIO(%d) low\n", TEST_PIN);
+      gpio_set_level(TEST_PIN, 0);
+      printf("GPIO ok\n");
+    }
+  }
+  */
   else
   {
     printf("unknown '%s'\n", cmd);
@@ -94,23 +151,32 @@ static void _cfg(uint32_t ac, char *av[])
   printf("\n");
   if (ac < 2)
   {
-    printf("%s [show|set_wifi|set_mqtt|erase]\n", av[0]);
+    printf("%s [show|set_wifi|push_type|set_http|set_mqtt|erase]\n", av[0]);
     return;
   }
 
   if (!strcmp(cmd, "show"))
   {
+    printf("Firmware version: %s\n", device_ver_str);
     printf(
-      "wifi.ssid: %s\n"
-      "wifi.password: %s\n",
+      "wifi.ssid: '%s'\n"
+      "wifi.password: '%s'\n",
       app_cfg.wifi_ssid,
       app_cfg.wifi_password
       );
     printf(
-      "mqtt.uri: %s\n"
-      "mqtt.client_id: %s\n"
-      "mqtt.username: %s\n"
-      "mqtt.password: %s\n",
+      "puth.type: '%s'\n",
+      app_cfg.push_type == 'h' ? "http" : "mqtt"
+      );
+    printf(
+      "http.uri: '%s'\n",
+      app_cfg.http_cfg.uri
+      );
+    printf(
+      "mqtt.uri: '%s'\n"
+      "mqtt.client_id: '%s'\n"
+      "mqtt.username: '%s'\n"
+      "mqtt.password: '%s'\n",
       app_cfg.mqtt_cfg.uri,
       app_cfg.mqtt_cfg.client_id,
       app_cfg.mqtt_cfg.username,
@@ -128,6 +194,30 @@ static void _cfg(uint32_t ac, char *av[])
       const char *password = ac >= 4 ? av[3] : "";
       strncpy(app_cfg.wifi_ssid, av[2], sizeof(app_cfg.wifi_ssid)-1);
       strncpy(app_cfg.wifi_password, password, sizeof(app_cfg.wifi_password)-1);
+      cfg_write(&app_cfg);
+    }
+  }
+  else if (!strcmp(cmd, "push_type"))
+  {
+    if (ac < 3)
+    {
+      printf("%s push_type <h|m>\n\t'h': http\n\t'm': mqtt\n", av[0]);
+    }
+    else
+    {
+      app_cfg.push_type = av[2][0];
+      cfg_write(&app_cfg);
+    }
+  }
+  else if (!strcmp(cmd, "set_http"))
+  {
+    if (ac < 3)
+    {
+      printf("%s set_http <uri>\n", av[0]);
+    }
+    else
+    {
+      strncpy(app_cfg.http_cfg.uri, av[2], sizeof(app_cfg.http_cfg.uri)-1);
       cfg_write(&app_cfg);
     }
   }
@@ -259,20 +349,41 @@ static void main_task_run(void* pvParameter)
 {
   char c;
   int cb;
+  uint32_t curent_sec;
+
   cmd_init(0);
 
-#if SUPPORT_MQTT
-  if (app_cfg.mqtt_cfg.uri[0] != 0)
+#if SUPPORT_WATCHDOG
+    uint32_t watchdog_check_sec = (uint32_t)(esp_timer_get_time() / 1000000);
+    //Subscribe this task to TWDT, then check if it is subscribed
+    CHECK_ERROR_CODE(esp_task_wdt_add(NULL), ESP_OK);
+    CHECK_ERROR_CODE(esp_task_wdt_status(NULL), ESP_OK);
+#endif
+
+  last_publish_sec = (uint32_t)(esp_timer_get_time() / 1000000);
+
+  if (app_cfg.push_type == 'h')
   {
-    // delay until WIFI is UP
-    vTaskDelay(10000 / portTICK_PERIOD_MS);
-    mqtt_task(app_cfg.mqtt_cfg.uri, app_cfg.mqtt_cfg.client_id, app_cfg.mqtt_cfg.username, app_cfg.mqtt_cfg.password);
+    if (app_cfg.http_cfg.uri[0] == 0)
+    {
+      ESP_LOGW(TAG, "push uri not configured");
+    }
   }
   else
   {
-    ESP_LOGW(TAG, "MQTT not started: mqtt not configured");
-  }
+#if SUPPORT_MQTT
+    if (app_cfg.mqtt_cfg.uri[0] != 0)
+    {
+      // delay until WIFI is UP
+      vTaskDelay(10000 / portTICK_PERIOD_MS);
+      mqtt_task(app_cfg.mqtt_cfg.uri, app_cfg.mqtt_cfg.client_id, app_cfg.mqtt_cfg.username, app_cfg.mqtt_cfg.password);
+    }
+    else
+    {
+      ESP_LOGW(TAG, "MQTT not started: mqtt not configured");
+    }
 #endif
+  }
   while (1)
   {
     cb = fread(&c, 1, 1, stdin);
@@ -285,6 +396,35 @@ static void main_task_run(void* pvParameter)
       //ESP_LOGI(TAG, "fread error");
       vTaskDelay(50 / portTICK_PERIOD_MS);
     }
+
+    if (http_num_error >= 20)
+    {
+      ESP_LOGE(TAG, "restart at http failure.");
+      vTaskDelay(50 / portTICK_PERIOD_MS);
+      esp_restart();
+    }
+
+    if (mqtt_num_error >= 30)
+    {
+      ESP_LOGE(TAG, "restart at network failure.");
+      vTaskDelay(50 / portTICK_PERIOD_MS);
+      esp_restart();
+    }
+
+    curent_sec = (uint32_t)(esp_timer_get_time() / 1000000);
+    if (curent_sec - last_publish_sec >= 120)
+    {
+      ESP_LOGE(TAG, "restart at sensor not working.");
+      esp_restart();
+    }
+
+#if SUPPORT_WATCHDOG
+    if (watchdog_check_sec != curent_sec) {
+      watchdog_check_sec = curent_sec;
+      //printf("watchdog_check_sec=%d\n", watchdog_check_sec);
+      CHECK_ERROR_CODE(esp_task_wdt_reset(), ESP_OK);
+    }
+#endif
   }
 }
 
@@ -320,16 +460,87 @@ static void app_init(void)
     cfg_get_default(&app_cfg);
 }
 
+static void http_publish(const char* device_id, const char* data)
+{
+  if (app_cfg.http_cfg.uri[0] == 0)
+  {
+    ESP_LOGW(TAG, "can't push sensor data, uri not configured");
+    return;
+  }
+
+  char output_buffer[512];
+  esp_err_t err;
+  esp_http_client_config_t config = {
+    .url = app_cfg.http_cfg.uri
+  };
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == NULL)
+  {
+    ESP_LOGW(TAG, "esp_http_client_init failed");
+    return;
+  }
+  size_t data_len = strlen(data);
+  //esp_http_client_set_url(client, app_cfg.http_cfg.uri);
+  esp_http_client_set_method(client, HTTP_METHOD_POST);
+  esp_http_client_set_header(client, "Content-Type", "application/json");
+  err = esp_http_client_open(client, data_len);
+  if (err != ESP_OK)
+  {
+      ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+      http_num_error++;
+  }
+  else
+  {
+    int wlen = esp_http_client_write(client, data, data_len);
+    if (wlen < 0) {
+      ESP_LOGE(TAG, "Write failed");
+      http_num_error++;
+    }
+    ESP_LOGI(TAG, "POST '%s'", app_cfg.http_cfg.uri);
+    int data_read = esp_http_client_read_response(client, output_buffer, sizeof(output_buffer));
+    if (data_read >= 0)
+    {
+      http_num_error = 0;
+      //ESP_LOGI(TAG, "HTTP GET Status = %d", esp_http_client_get_status_code(client));
+    }
+    else
+    {
+      ESP_LOGE(TAG, "Failed to read response");
+      http_num_error++;
+    }
+  }
+  esp_http_client_cleanup(client);
+}
+
+static void on_sensor_publish(const char* device_id, const char* data)
+{
+  last_publish_sec = (uint32_t)(esp_timer_get_time() / 1000000);
+  if (app_cfg.push_type == 'h')
+  {
+    http_publish(device_id, data);
+  }
+  else
+  {
+    mqtt_task_publish(device_id, data);
+  }
+}
+
 void app_main(void)
 {
   app_init();
+  //test_gpio_init();
+  ESP_ERROR_CHECK(esp_event_loop_create_default());
   wifi_setup();
 
+#if SUPPORT_WATCHDOG
+  CHECK_ERROR_CODE(esp_task_wdt_init(TWDT_TIMEOUT_S, true), ESP_OK);  // set true to reboot device when task is hang.
+#endif
+
 #if SUPPORT_SHT3x
-  sht3x_task(device_mac_str, mqtt_task_publish);
+  sht3x_task(device_mac_str, on_sensor_publish);
 #endif
 #if SUPPORT_SPS30
-  sps30_task(device_mac_str, mqtt_task_publish);
+  sps30_task(device_mac_str, on_sensor_publish);
 #endif
   xTaskCreate(main_task_run, "main_task", 1024 * 8, (void *)0, 10, NULL);
 }

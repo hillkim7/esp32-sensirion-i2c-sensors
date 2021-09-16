@@ -17,6 +17,7 @@ int cfg_init()
 void cfg_get_default(CFG* cfg)
 {
   memset(cfg, 0, sizeof(CFG));
+  cfg->push_type = 'h';  // default http mode
 }
 
 static int cfg_read_(const char* name_space, const char* key, uint8_t* data, size_t data_size)
@@ -83,6 +84,7 @@ int cfg_write_(const char* name_space, const char* key, const uint8_t* data, siz
     return -1;
   }
 
+  nvs_commit(handle);
   nvs_close(handle);
   ESP_LOGD(TAG, "oc_storage_write: '%s' %d", key, data_size);
 
@@ -100,6 +102,7 @@ int cfg_erase_(const char* name_space)
     return -1;
   }
   nvs_erase_all(handle);
+  nvs_commit(handle);
   nvs_close(handle);
   return 0;
 }

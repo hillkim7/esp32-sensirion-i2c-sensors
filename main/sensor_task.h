@@ -3,6 +3,8 @@
 
 typedef void (*sensor_reporter_t)(const char* dev_id, const char* data);
 
+extern int mqtt_num_error;
+
 void sht3x_task(const char* device_id, sensor_reporter_t reporter);
 void sps30_task(const char* device_id, sensor_reporter_t reporter);
 void mqtt_task_status_print(void);

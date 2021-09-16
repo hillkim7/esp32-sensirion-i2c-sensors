@@ -17,6 +17,7 @@ static const char TAG[] = "mqtt-task";
 
 static esp_mqtt_client_handle_t mqtt_client;
 static uint8_t mqtt_connected = 0;
+int mqtt_num_error = 0;
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 {
@@ -40,6 +41,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
 #endif
         mqtt_connected = 1;
+        mqtt_num_error = 0;
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -65,6 +67,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         printf("DATA=%.*s\r\n", event->data_len, event->data);
         break;
     case MQTT_EVENT_ERROR:
+        mqtt_num_error++;
         mqtt_connected = 0;
         ESP_LOGW(TAG, "MQTT_EVENT_ERROR");
         break;
@@ -86,7 +89,8 @@ static void mqtt_app_start(const char* uri, const char* client_id, const char* u
     .uri = uri,
     .client_id = client_id,
     .username = username,
-    .password = password
+    .password = password,
+    .reconnect_timeout_ms = 20000
   };
 
   mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -108,11 +112,12 @@ void mqtt_task_status_print(void)
 
 void mqtt_task_publish(const char* device_id, const char* data)
 {
-  if (mqtt_client != NULL)
+  if (mqtt_connected)
   {
     char topic[64];
+    const int qos = 0;  // No QOS specified because sensor data can be loss.
     sprintf(topic, "/sensors/%s/report", device_id);
-    int msg_id = esp_mqtt_client_publish(mqtt_client, topic, data, 0, 1, 0);
+    int msg_id = esp_mqtt_client_publish(mqtt_client, topic, data, 0, qos, 0);
     ESP_LOGI(TAG, "esp_mqtt_client_publish: topic=%s data=%s result=%d", topic, data, msg_id);
   }
   else

@@ -12,7 +12,6 @@
 static const char TAG[] = "sps30-task";
 
 static char sps30_device_id[32];
-static char sps30_buffer[256];
 static sensor_reporter_t sps30_reporter;
 
 void sps30_task_run(void *arg)
@@ -21,6 +20,8 @@ void sps30_task_run(void *arg)
   char serial[SPS30_MAX_SERIAL_LEN];
   const uint8_t AUTO_CLEAN_DAYS = 4;
   int16_t ret;
+  static char report_buffer[300];
+  uint64_t last_measure_ms, diff_ms, sleep_ms = 60000;
 
   ESP_LOGD(TAG, "sps30_task_run started");
   while (sensirion_uart_open() != 0) {
@@ -61,6 +62,7 @@ void sps30_task_run(void *arg)
       ESP_LOGE(TAG, "error %d setting the auto-clean interval\n", ret);
 
   while (1) {
+    last_measure_ms = esp_timer_get_time() / 1000;
     ret = sps30_start_measurement();
     if (ret < 0) {
         ESP_LOGE(TAG, "error starting measurement");
@@ -82,23 +84,23 @@ void sps30_task_run(void *arg)
             }
 
             ESP_LOGI(TAG, "measured values:\n"
-                   "\t%0.2f pm1.0\n"
-                   "\t%0.2f pm2.5\n"
-                   "\t%0.2f pm4.0\n"
+                   "\t%0.2f pm1.0"
+                   "\t%0.2f pm2.5"
+                   "\t%0.2f pm4.0"
                    "\t%0.2f pm10.0\n"
-                   "\t%0.2f nc0.5\n"
-                   "\t%0.2f nc1.0\n"
-                   "\t%0.2f nc2.5\n"
-                   "\t%0.2f nc4.5\n"
+                   "\t%0.2f nc0.5"
+                   "\t%0.2f nc1.0"
+                   "\t%0.2f nc2.5"
+                   "\t%0.2f nc4.5"
                    "\t%0.2f nc10.0\n"
-                   "\t%0.2f typical particle size\n\n",
+                   "\t%0.2f typical particle size\n",
                    m.mc_1p0, m.mc_2p5, m.mc_4p0, m.mc_10p0, m.nc_0p5,
                    m.nc_1p0, m.nc_2p5, m.nc_4p0, m.nc_10p0,
                    m.typical_particle_size);
             if (i >= 2) // take second value
             {
               // print data with json format
-              sprintf(sps30_buffer, "{"
+              sprintf(report_buffer, "{"
                 "\"type\": \"PM\","
                 "\"pm1.0\": %0.2f,"
                 "\"pm2.5\": %0.2f,"
@@ -108,12 +110,14 @@ void sps30_task_run(void *arg)
                 "\"nc1.0\": %0.2f,"
                 "\"nc2.5\": %0.2f,"
                 "\"nc4.5\": %0.2f,"
-                "\"nc10.0\": %0.2f"
+                "\"nc10.0\": %0.2f,"
+                "\"t\": %u"
                 "}",
                 m.mc_1p0, m.mc_2p5, m.mc_4p0, m.mc_10p0, m.nc_0p5,
-                m.nc_1p0, m.nc_2p5, m.nc_4p0, m.nc_10p0
+                m.nc_1p0, m.nc_2p5, m.nc_4p0, m.nc_10p0,
+                (uint32_t)(esp_timer_get_time() / 1000000)
                 );
-              sps30_reporter(sps30_device_id, sps30_buffer);
+              sps30_reporter(sps30_device_id, report_buffer);
               break;
             }
         }
@@ -135,8 +139,13 @@ void sps30_task_run(void *arg)
         }
     }
 
-    ESP_LOGI(TAG, "No measurements for 1 minute");
-    sensirion_sleep_usec(1000000 * 60);
+    diff_ms = esp_timer_get_time() / 1000 - last_measure_ms;
+    ESP_LOGI(TAG, "No measurements for %d ms", (int)(sleep_ms - diff_ms));
+    if (diff_ms < sleep_ms)
+    {
+      vTaskDelay((sleep_ms - diff_ms) / portTICK_PERIOD_MS);
+    }
+    //sensirion_sleep_usec(1000000 * 60);
 
     if (version_information.firmware_major >= 2) {
         ret = sps30_wake_up();
@@ -154,6 +163,6 @@ void sps30_task(const char* device_id, sensor_reporter_t reporter)
 {
   strncpy(sps30_device_id, device_id, sizeof(sps30_device_id) - 1);
   sps30_reporter = reporter;
-  xTaskCreate(sps30_task_run, "sps30_task_run", 1024 * 6, (void *)0, 10, NULL);
+  xTaskCreate(sps30_task_run, "sps30_task_run", 1024 * 7, (void *)0, 10, NULL);
 }
 

@@ -8,12 +8,14 @@
 
 #define SLOW_SENSOR_FETCH 1
 
+#define SENSOR_RESET_PIN 4
+
 static const char TAG[] = "sht3x-task";
 
 #define I2C_MASTER_SCL_IO GPIO_NUM_22
 #define I2C_MASTER_SDA_IO GPIO_NUM_21
 #define I2C_MASTER_NUM    I2C_NUM_0
-#define I2C_MASTER_FREQ_HZ I2C_FREQ_500K
+#define I2C_MASTER_FREQ_HZ I2C_FREQ_400K
 #define I2C_MASTER_TX_BUF_DISABLE 0
 #define I2C_MASTER_RX_BUF_DISABLE 0
 
@@ -44,12 +46,32 @@ static esp_err_t i2c_master_init(void)
     return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
+#if SUPPORT_SENSOR_RESET
+void sht3x_reset()
+{
+  printf("GPIO %d low\n", SENSOR_RESET_PIN);
+  gpio_set_level(SENSOR_RESET_PIN, 0);
+  vTaskDelay(5 / portTICK_PERIOD_MS);
+  printf("high\n");
+  gpio_set_level(SENSOR_RESET_PIN, 1);
+  vTaskDelay(100 / portTICK_PERIOD_MS);
+  while ((sht3x_sensor = sht3x_init_sensor (I2C_MASTER_NUM, SHT3x_ADDR_1)) == NULL)
+  {
+    ESP_LOGE(TAG, "sht3x_init_sensor failed\n");
+    vTaskDelay(3600000 / portTICK_PERIOD_MS);
+  }
+  printf("sht3x_init_sensor ok\n");
+  sht3x_start_measurement (sht3x_sensor, sht3x_periodic_1mps, sht3x_high);
+  vTaskDelay(100 / portTICK_PERIOD_MS);
+}
+#endif
+
 void sht3x_task_run(void *arg)
 {
   float temperature, humidity;
   char report_buf[128];
 
-  ESP_LOGD(TAG, "sht3x_task_run started");
+  ESP_LOGI(TAG, "sht3x_task_run started");
   while ((sht3x_sensor = sht3x_init_sensor (I2C_MASTER_NUM, SHT3x_ADDR_1)) == NULL)
   {
     ESP_LOGE(TAG, "sht3x_init_sensor failed\n");
@@ -89,7 +111,10 @@ void sht3x_task_run(void *arg)
     }
     else
     {
-      ESP_LOGW(TAG, "failed to fetch temperature\n");
+      ESP_LOGE(TAG, "failed to fetch temperature\n");
+#if SUPPORT_SENSOR_RESET
+      sht3x_reset();
+#endif
     }
 
     diff_ms = esp_timer_get_time() / 1000 - last_measure_ms;
@@ -102,6 +127,11 @@ void sht3x_task_run(void *arg)
 
 void sht3x_task(const char* device_id, sensor_reporter_t reporter)
 {
+#if SUPPORT_SENSOR_RESET
+  gpio_reset_pin(SENSOR_RESET_PIN);
+  gpio_set_direction(SENSOR_RESET_PIN, GPIO_MODE_OUTPUT);
+  gpio_set_level(SENSOR_RESET_PIN, 1);
+#endif
   strncpy(sht3x_device_id, device_id, sizeof(sht3x_device_id) - 1);
   sht3x_reporter = reporter;
   ESP_ERROR_CHECK(i2c_master_init());

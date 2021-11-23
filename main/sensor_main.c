@@ -100,7 +100,7 @@ static void _sys(uint32_t ac, char *av[])
   printf("\n");
   if (ac < 2)
   {
-    printf("%s [stat|reboot]\n", av[0]);
+    printf("%s [stat|reboot|sht3x_reset]\n", av[0]);
     return;
   }
 
@@ -120,6 +120,14 @@ static void _sys(uint32_t ac, char *av[])
   else if (!strcmp(cmd, "reboot"))
   {
     esp_restart();
+  }
+  else if (!strcmp(cmd, "sht3x_reset"))
+  {
+#if SUPPORT_SENSOR_RESET
+    sht3x_reset();
+#else
+    printf("command not supported\n");
+#endif
   }
   /*
   else if (!strcmp(cmd, "test"))
